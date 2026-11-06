@@ -1,0 +1,409 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Valorant Web - Prime Vandal</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #111;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            user-select: none;
+        }
+
+        /* UI загрузки и ошибок */
+        #ui-layer {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            z-index: 100;
+            pointer-events: none;
+        }
+        #loading {
+            color: #00ffcc;
+            font-weight: bold;
+            font-size: 18px;
+            background: rgba(0, 0, 0, 0.7);
+            padding: 10px 15px;
+            border-radius: 4px;
+            border-left: 4px solid #00ffcc;
+        }
+        #error {
+            display: none;
+            color: #ff4655;
+            font-weight: bold;
+            font-size: 16px;
+            background: rgba(0, 0, 0, 0.8);
+            padding: 15px;
+            border-radius: 4px;
+            border-left: 4px solid #ff4655;
+            max-width: 400px;
+            line-height: 1.5;
+        }
+
+        /* Прицел */
+        #crosshair {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            width: 4px;
+            height: 4px;
+            background: #00ffff;
+            transform: translate(-50%, -50%);
+            pointer-events: none;
+            z-index: 10;
+            display: none;
+        }
+        #crosshair::before, #crosshair::after {
+            content: '';
+            position: absolute;
+            background: #00ffff;
+        }
+        #crosshair::before { width: 20px; height: 2px; top: 1px; left: -8px; }
+        #crosshair::after { width: 2px; height: 20px; top: -8px; left: 1px; }
+
+        /* Стартовое меню */
+        #menu {
+            position: absolute;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(15, 25, 35, 0.9);
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            color: #ece8e1;
+            z-index: 20;
+        }
+        h1 {
+            color: #ff4655;
+            font-size: 64px;
+            margin-bottom: 10px;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+        }
+        p.desc {
+            font-size: 18px;
+            margin-bottom: 30px;
+            color: #a0a5a8;
+            text-align: center;
+        }
+        button {
+            padding: 15px 40px;
+            font-size: 24px;
+            background-color: #ff4655;
+            color: #ece8e1;
+            border: none;
+            cursor: pointer;
+            font-weight: bold;
+            text-transform: uppercase;
+            transition: background 0.2s ease;
+        }
+        button:hover { background-color: #ff2035; }
+    </style>
+
+    <!-- Подключаем Three.js и модули через стабильный CDN -->
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+            }
+        }
+    </script>
+</head>
+<body>
+
+    <div id="ui-layer">
+        <div id="loading">Ожидание инициализации...</div>
+        <div id="error"></div>
+    </div>
+
+    <div id="crosshair"></div>
+
+    <div id="menu">
+        <h1>Valorant Web</h1>
+        <p class="desc">
+            W, A, S, D — Перемещение<br>
+            SPACE — Прыжок<br>
+            ЛКМ — Стрельба<br><br>
+            <span style="font-size: 14px; color: #ff4655;">Требуется распакованная модель <b>vandal.glb</b> в корне репозитория.</span>
+        </p>
+        <button id="playBtn">Войти в игру</button>
+    </div>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { PointerLockControls } from 'three/addons/controls/PointerLockControls.js';
+        import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+
+        // Элементы UI
+        const loadingUI = document.getElementById('loading');
+        const errorUI = document.getElementById('error');
+        const menu = document.getElementById('menu');
+        const crosshair = document.getElementById('crosshair');
+        const playBtn = document.getElementById('playBtn');
+
+        // Основные переменные
+        let camera, scene, renderer, controls;
+        let weaponModel = null;
+        let raycaster;
+        const targetObjects = [];
+
+        // Физика и управление
+        let moveForward = false, moveBackward = false, moveLeft = false, moveRight = false;
+        let canJump = false;
+        let prevTime = performance.now();
+        const velocity = new THREE.Vector3();
+        const direction = new THREE.Vector3();
+
+        // Анимация стрельбы
+        let isShooting = false;
+        let recoilProgress = 0;
+        const weaponBasePos = new THREE.Vector3(0.15, -0.2, -0.4); // Базовая позиция в руках
+        const weaponBaseRot = new THREE.Euler(0, Math.PI, 0); // Базовый поворот (от себя)
+
+        init();
+        animate();
+
+        function init() {
+            // 1. СЦЕНА И ТУМАН
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x87ceeb); // Небесный цвет
+            scene.fog = new THREE.Fog(0x87ceeb, 10, 200);
+
+            // 2. КАМЕРА
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+            camera.position.y = 1.6; // Уровень глаз (1.6 метра)
+            scene.add(camera); // Важно: добавляем камеру в сцену, т.к. к ней будет прикреплено оружие
+
+            // 3. ОСВЕЩЕНИЕ (Важно для материалов Prime Vandal)
+            const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+            scene.add(ambientLight);
+
+            const dirLight = new THREE.DirectionalLight(0xffffff, 1.5);
+            dirLight.position.set(50, 100, 50);
+            dirLight.castShadow = true;
+            dirLight.shadow.mapSize.width = 2048;
+            dirLight.shadow.mapSize.height = 2048;
+            scene.add(dirLight);
+
+            // Свет от игрока, чтобы освещать модель оружия спереди
+            const pointLight = new THREE.PointLight(0xffaa55, 0.5, 5);
+            pointLight.position.set(0, 0, 0);
+            camera.add(pointLight);
+
+            // 4. ОКРУЖЕНИЕ (Пол и мишени)
+            const floorGeo = new THREE.PlaneGeometry(200, 200);
+            const floorMat = new THREE.MeshStandardMaterial({ color: 0x333333, roughness: 0.8 });
+            const floor = new THREE.Mesh(floorGeo, floorMat);
+            floor.rotation.x = -Math.PI / 2;
+            floor.receiveShadow = true;
+            scene.add(floor);
+
+            // Сетка на полу
+            const grid = new THREE.GridHelper(200, 100, 0x000000, 0x000000);
+            grid.material.opacity = 0.2;
+            grid.material.transparent = true;
+            scene.add(grid);
+
+            // Мишени
+            const boxGeo = new THREE.BoxGeometry(1, 2, 1);
+            const boxMat = new THREE.MeshStandardMaterial({ color: 0xff4655, roughness: 0.4 });
+            for (let i = 0; i < 20; i++) {
+                const box = new THREE.Mesh(boxGeo, boxMat);
+                box.position.set(
+                    (Math.random() - 0.5) * 40,
+                    1,
+                    (Math.random() - 0.5) * 40 - 10
+                );
+                box.castShadow = true;
+                box.receiveShadow = true;
+                scene.add(box);
+                targetObjects.push(box);
+            }
+
+            // 5. УПРАВЛЕНИЕ И ИНТЕРФЕЙС
+            controls = new PointerLockControls(camera, document.body);
+            playBtn.addEventListener('click', () => { controls.lock(); });
+
+            controls.addEventListener('lock', () => {
+                menu.style.display = 'none';
+                crosshair.style.display = 'block';
+            });
+
+            controls.addEventListener('unlock', () => {
+                menu.style.display = 'flex';
+                crosshair.style.display = 'none';
+            });
+
+            // 6. ЗАГРУЗКА НАСТОЯЩЕЙ МОДЕЛИ (Prime Vandal)
+            const loader = new GLTFLoader();
+            loadingUI.innerText = 'Загрузка Prime Vandal: 0%';
+
+            // ВАЖНО: Если ты распаковал архив и получил папку с .gltf, измени строку ниже на './vandal.gltf'
+            loader.load(
+                './vandal.glb', 
+                (gltf) => {
+                    loadingUI.style.display = 'none'; // Убираем лоадер
+                    weaponModel = gltf.scene;
+
+                    // Настройка теней для всех мешей модели
+                    weaponModel.traverse((node) => {
+                        if (node.isMesh) {
+                            node.castShadow = true;
+                            node.receiveShadow = true;
+                            // Если материалы слишком темные, можно добавить: node.material.envMapIntensity = 2.0;
+                        }
+                    });
+
+                    // Масштаб: зависит от того, в чем экспортировали. 
+                    // 1.0, 0.1, или 0.01 - самые частые. Если оружие огромное, измени на 0.01
+                    weaponModel.scale.set(0.1, 0.1, 0.1); 
+
+                    // Устанавливаем базовую позицию и поворот
+                    weaponModel.position.copy(weaponBasePos);
+                    weaponModel.rotation.copy(weaponBaseRot);
+
+                    // ПРИВЯЗЫВАЕМ ОРУЖИЕ К КАМЕРЕ (От первого лица)
+                    camera.add(weaponModel);
+                },
+                (xhr) => {
+                    if (xhr.total > 0) {
+                        const percent = Math.round((xhr.loaded / xhr.total) * 100);
+                        loadingUI.innerText = `Загрузка Prime Vandal: ${percent}%`;
+                    } else {
+                        loadingUI.innerText = `Загрузка Prime Vandal... (${Math.round(xhr.loaded / 1024)} KB)`;
+                    }
+                },
+                (error) => {
+                    console.error('Ошибка загрузки модели:', error);
+                    loadingUI.style.display = 'none';
+                    errorUI.style.display = 'block';
+                    errorUI.innerHTML = `
+                        <b>Критическая ошибка загрузки оружия!</b><br>
+                        1. Убедитесь, что вы извлекли файлы из .zip архива.<br>
+                        2. Файл должен называться <code>vandal.glb</code> и лежать в корне GitHub-репозитория.<br>
+                        3. Ошибка: ${error.message}
+                    `;
+                }
+            );
+
+            // 7. СТРЕЛЬБА
+            raycaster = new THREE.Raycaster();
+            document.addEventListener('mousedown', (event) => {
+                if (controls.isLocked && event.button === 0 && weaponModel) {
+                    shoot();
+                }
+            });
+
+            // 8. КЛАВИАТУРА
+            const onKeyDown = (e) => {
+                switch (e.code) {
+                    case 'KeyW': moveForward = true; break;
+                    case 'KeyA': moveLeft = true; break;
+                    case 'KeyS': moveBackward = true; break;
+                    case 'KeyD': moveRight = true; break;
+                    case 'Space': if (canJump) velocity.y += 10; canJump = false; break;
+                }
+            };
+            const onKeyUp = (e) => {
+                switch (e.code) {
+                    case 'KeyW': moveForward = false; break;
+                    case 'KeyA': moveLeft = false; break;
+                    case 'KeyS': moveBackward = false; break;
+                    case 'KeyD': moveRight = false; break;
+                }
+            };
+            document.addEventListener('keydown', onKeyDown);
+            document.addEventListener('keyup', onKeyUp);
+
+            // 9. РЕНДЕРЕР
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setPixelRatio(window.devicePixelRatio);
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.shadowMap.enabled = true;
+            renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+            document.body.appendChild(renderer.domElement);
+
+            window.addEventListener('resize', () => {
+                camera.aspect = window.innerWidth / window.innerHeight;
+                camera.updateProjectionMatrix();
+                renderer.setSize(window.innerWidth, window.innerHeight);
+            });
+        }
+
+        function shoot() {
+            // Эффект отдачи (смещение назад и поворот вверх)
+            isShooting = true;
+            recoilProgress = 1.0; 
+            
+            // Физика стрельбы (попадания)
+            raycaster.setFromCamera(new THREE.Vector2(0, 0), camera);
+            const intersects = raycaster.intersectObjects(targetObjects, false);
+
+            if (intersects.length > 0) {
+                const hitMesh = intersects[0].object;
+                hitMesh.material.color.setHex(0x00ffcc); // Меняем цвет при попадании
+                // Уменьшаем мишень при попадании
+                hitMesh.scale.multiplyScalar(0.9);
+            }
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            const time = performance.now();
+
+            if (controls.isLocked === true) {
+                const delta = (time - prevTime) / 1000;
+
+                // --- ФИЗИКА И ДВИЖЕНИЕ ---
+                velocity.x -= velocity.x * 10.0 * delta;
+                velocity.z -= velocity.z * 10.0 * delta;
+                velocity.y -= 30.0 * delta; // Гравитация
+
+                direction.z = Number(moveForward) - Number(moveBackward);
+                direction.x = Number(moveRight) - Number(moveLeft);
+                direction.normalize();
+
+                const speed = 50.0;
+                if (moveForward || moveBackward) velocity.z -= direction.z * speed * delta;
+                if (moveLeft || moveRight) velocity.x -= direction.x * speed * delta;
+
+                controls.moveRight(-velocity.x * delta);
+                controls.moveForward(-velocity.z * delta);
+                controls.getObject().position.y += (velocity.y * delta);
+
+                if (controls.getObject().position.y < 1.6) {
+                    velocity.y = 0;
+                    controls.getObject().position.y = 1.6;
+                    canJump = true;
+                }
+
+                // --- АНИМАЦИЯ ОТДАЧИ ОРУЖИЯ ---
+                if (weaponModel) {
+                    if (recoilProgress > 0) {
+                        // Быстрый удар отдачи (вверх и на себя)
+                        weaponModel.position.z = weaponBasePos.z + 0.05 * recoilProgress;
+                        weaponModel.position.y = weaponBasePos.y + 0.02 * recoilProgress;
+                        weaponModel.rotation.x = weaponBaseRot.x + 0.1 * recoilProgress;
+                        
+                        // Плавный возврат (Lerp)
+                        recoilProgress -= delta * 5; 
+                    } else {
+                        // Возвращаем в исходную точку
+                        weaponModel.position.lerp(weaponBasePos, 0.1);
+                        weaponModel.rotation.x = THREE.MathUtils.lerp(weaponModel.rotation.x, weaponBaseRot.x, 0.1);
+                        isShooting = false;
+                    }
+                }
+            }
+
+            prevTime = time;
+            renderer.render(scene, camera);
+        }
+    </script>
+</body>
+</html>
